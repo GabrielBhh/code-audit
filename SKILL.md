@@ -60,13 +60,18 @@ Each tool step is **opportunistic** — use what's installed, fall back to Claud
 | `<hash1>..<hash2>` | `git diff <hash1>..<hash2>` |
 | `baseline update` | Re-snapshot current findings as accepted baseline |
 
-### Load project config
+### Load project config (conditional)
 
-Before analysing, read these if present:
+Check for these files with `ls`. Only load the reference files if the corresponding project files exist — don't load references unconditionally.
 
-- `.codereview-baseline.json` — baseline of accepted findings (see `references/baseline-and-state.md`)
-- `.codereview-ignore` — patterns and file-specific ignores
-- Project conventions: `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, `ARCHITECTURE.md`, `docs/adr/*.md`, `.editorconfig`, `.prettierrc`, language-specific configs (`ruff.toml`, `.eslintrc`, etc.)
+| Project file present | Reference file to load |
+|---|---|
+| `.codereview-baseline.json` | `references/baseline-and-state.md` |
+| Any of: `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, `ARCHITECTURE.md`, `docs/adr/*.md` | `references/convention-compliance-rules.md` (in Step 7) |
+
+Also read these directly if present (no reference file needed):
+- `.codereview-ignore` — patterns and file-specific ignores (follow the format described in baseline-and-state.md only if loaded)
+- Tool configs: `.editorconfig`, `.prettierrc`, `.eslintrc`, `ruff.toml`, etc. (use contents directly)
 
 ### Large-codebase strategy
 
@@ -74,77 +79,123 @@ For `all` or directory reviews of >50 files: summarise scope up front, then work
 
 ---
 
-## Step 2 — Claude reasoning pass (baked-in first layer)
+## Step 2 — Reasoning pass (baked-in first layer)
 
-Apply Claude's native reasoning before running any tools. This is the skill's equivalent of Claude's built-in review — deliberately included here so users don't need to invoke two separate skills.
+Apply baseline reasoning before running tools. This is the skill's equivalent of an in-flow review — included here so users don't need to invoke two separate skills.
 
-Focus on:
+### Lazy loading (IMPORTANT for token efficiency)
+
+Reference files are split for lazy loading. **Load only what applies to the files in scope.** Never load all reference files up front.
+
+#### Language files — load per detected language
+
+Always load `references/lang/_common.md` (language-agnostic simplification patterns, ~300 tokens).
+
+Then for each detected language, load ONLY that language's file:
+
+| Extension | File to load |
+|---|---|
+| `.py` | `references/lang/python.md` |
+| `.js`, `.ts`, `.jsx`, `.tsx` | `references/lang/javascript-typescript.md` |
+| `.go` | `references/lang/go.md` |
+| `.rs` | `references/lang/rust.md` |
+| `.rb` | `references/lang/ruby.md` |
+| `.php` | `references/lang/php.md` |
+| `.java`, `.kt` | `references/lang/java-kotlin.md` |
+| `.cs` | `references/lang/csharp.md` |
+| `.dart` | `references/lang/dart-flutter.md` |
+| `.c`, `.cpp`, `.h`, `.hpp` | `references/lang/c-cpp.md` |
+| `.swift` | `references/lang/swift.md` |
+| `.sql` | `references/lang/sql.md` |
+| `.sh`, `.bash` | `references/lang/shell.md` |
+| `Dockerfile`, `*.tf`, `*.yaml` (k8s) | `references/lang/dockerfile-iac.md` |
+
+#### Security files — load by applicability
+
+- **Always load** `references/security/core-owasp.md` (universal OWASP concerns, ~700 tokens)
+- **Web languages** (JS/TS/Python/PHP/Ruby/Java/Kotlin/Go in web contexts): load `references/security/web-patterns.md`
+- **Auth code detected** (JWT, OAuth, session handling): load `references/security/api-auth.md`
+- **Native languages** (C, C++, and `unsafe` Rust): load `references/security/native-patterns.md`
+- `references/security/secrets-regex.md` — load ONLY in Step 5 (secret scanning)
+
+#### Other conditional references
+
+- `references/api-design-rules.md` — load only if REST controllers, GraphQL schemas, or `.proto` files detected
+- `references/convention-compliance-rules.md` — load only if any convention doc exists in the repo (see Step 7)
+- `references/baseline-and-state.md` — load only if `.codereview-baseline.json` exists or user invokes `baseline update`
+- `references/git-intelligence-rules.md` — load only if scope is `all` or `<branch>` (skip for small `staged` diffs)
+
+**Do not load what isn't needed.** On a small Python staged diff, total reference load is typically ~2-3K tokens, not 15K.
+
+### What to look for in this step
+
+Using the loaded references, focus on:
 
 - **Bugs & logic errors** — null/undefined dereferences, off-by-one, race conditions, unhandled edge cases, wrong conditionals, crash paths
-- **Security patterns** — apply `references/security-rules.md` (OWASP Top 10, SSTI, XXE, ReDoS, JWT pitfalls, open redirect, CSRF, timing attacks, secret detection regex)
-- **Non-obvious language patterns** — apply `references/language-rules.md` and `references/simplification-rules.md` (only the patterns in these files — do NOT additionally list generic idioms Claude would catch by default, like `var → const` or `== vs ===`)
-- **API design** — apply `references/api-design-rules.md` for REST/GraphQL/gRPC surfaces
-- **Swift/SwiftUI** — apply `references/swift-apple-rules.md` for `.swift` files
+- **Security patterns** — OWASP findings per the loaded `references/security/*.md` files
+- **Non-obvious language patterns** — per the loaded `references/lang/*.md` file(s)
+- **API design** — per `references/api-design-rules.md` if loaded
 
-**Important**: the reference files are intentionally curated. Do not invent generic "best practice" findings beyond what tools or references explicitly call out. The point of this skill is to add what tools + repo-wide analysis surface, not to repeat what Claude would say by default.
+**Important**: reference files are intentionally curated. Do not invent generic "best practice" findings beyond what tools or references explicitly call out. The value of this skill is tool execution + repo-wide analysis, not repeating what reasoning would produce by default.
 
 ---
 
 ## Step 3 — Static analysis orchestration
 
-Load `references/tool-orchestration-rules.md`. For each detected language:
+Load `references/tools/static-analysis.md`. For each detected language:
 
 1. Detect which tools are installed (`command -v <tool>`)
-2. Run the installed tools (may include network calls for updated rules)
+2. Run the installed tools
 3. Parse output, map findings to severity tiers
 4. Note which tools were NOT installed and would have added value
 
-Tools covered per language: `ruff`, `mypy`, `bandit`, `semgrep`, `vulture`, `eslint`, `tsc --noEmit`, `biome`, `ts-prune`, `go vet`, `staticcheck`, `golangci-lint`, `gosec`, `cargo clippy`, `cargo-udeps`, `rubocop`, `brakeman`, `phpstan`, `psalm`, `shellcheck`, `tfsec`, `checkov`, `tflint`, `hadolint`, `trivy`, `detekt`, `spotbugs`, and more.
-
-**Fallback pattern**: if no tools are installed for an ecosystem, rely on Claude's reasoning (already done in Step 2) and emit a single 🔵 Suggestion noting which tools would help.
+**Fallback**: if no tools are installed for an ecosystem, rely on Step 2 reasoning and emit a single 🔵 Suggestion noting which tools would help.
 
 ---
 
 ## Step 4 — CVE + license scanning
 
-Load `references/tool-orchestration-rules.md` (CVE section). For each detected dependency file:
+Only run if dependency files exist in the repo.
+
+Load `references/tools/cve-scanning.md` for CVE process and ecosystem map. If running license checks, also load `references/tools/license-compliance.md`.
 
 1. Try the ecosystem CLI tool first (`pip-audit`, `npm audit`, `cargo audit`, `govulncheck`, `bundle audit`, `composer audit`, `dotnet list package --vulnerable`, `dart pub outdated`, `trivy fs .`)
 2. If the tool is not installed, POST to `https://api.osv.dev/v1/querybatch` with extracted `(name, version)` pairs
 3. Map CVSS scores to severity: ≥7.0 → 🔴, 4.0–6.9 → 🟡, <4.0 → 🔵
-4. **License compliance**: try `pip-licenses`, `license-checker`, `cargo-license` — flag GPL/AGPL/copyleft in transitive deps if the project licence is MIT/Apache/BSD
+4. For license compliance, run `pip-licenses` / `license-checker` / `cargo-license` and flag copyleft contamination
 
 ---
 
 ## Step 5 — Secrets in git history
 
-If `gitleaks` is available:
-```
-gitleaks detect --source . --report-format json
-```
+Load `references/tools/secret-history.md` and `references/security/secrets-regex.md`.
 
-If not, try `trufflehog git file://. --json`. If neither is available, emit a 🔵 Suggestion with the install command. Do not scan history manually (too slow, too many false positives) — this is where tools clearly win.
+Try `gitleaks detect --source . --report-format json --no-banner`. If not available, try `trufflehog git file://. --json`. If neither is installed, emit a single 🔵 Suggestion with the install command. Do not scan history manually.
 
-Finding severity: **always 🔴 Critical** when a secret is detected, even if later deleted from current HEAD — the commit SHA is public the moment it's pushed.
+Finding severity: **always 🔴 Critical** when a secret is detected, even if later deleted from HEAD — the commit SHA is public the moment it was pushed.
 
 ---
 
 ## Step 6 — Git intelligence
 
-Load `references/git-intelligence-rules.md`. Run:
+**Skip this step entirely for small-scope reviews** (single file, small `staged` diff). Only run when:
+- Scope is `all` or `<branch>`
+- Or the `staged` diff touches >5 files
 
-- **Churn × complexity hotspots**: combine `git log --since="6 months ago" --name-only` counts with cyclomatic complexity per file — flag files that are both frequently changed AND complex (🟡 Warning)
-- **Ownership / bus factor**: `git log --format='%an' <file>` — flag files only one author has ever touched in the changed set (🔵 Suggestion unless the file is core infra, then 🟡)
-- **Temporal coupling**: files changed together in the same commits more than 70% of the time, but in different modules → hidden coupling (🔵)
-- **Dead file candidates**: tracked files with zero commits in 2+ years and zero inbound imports → possible dead code (🔵)
+If the step runs, load `references/git-intelligence-rules.md`. Analyze:
 
-For a `staged` scope, only report hotspot metrics for files in the diff — don't derail into whole-repo archaeology.
+- **Churn × complexity hotspots**: flag files frequently changed AND complex (🟡)
+- **Ownership / bus factor**: flag single-author files in the diff (🔵, or 🟡 for core infra)
+- **Temporal coupling**: files changing together across modules >70% (🔵)
+- **Dead file candidates**: only on `all` reviews — tracked files with zero commits in 2+ years (🔵)
 
 ---
 
 ## Step 7 — Convention compliance
 
-Load `references/convention-compliance-rules.md`. Cross-check findings against:
+**Skip this step entirely if no convention docs exist in the repo.** Quick check first: `ls CLAUDE.md AGENTS.md CONTRIBUTING.md ARCHITECTURE.md docs/adr/ 2>/dev/null`. If none of those exist, move to Step 8.
+
+If convention docs do exist, load `references/convention-compliance-rules.md`. Cross-check findings against:
 
 - Rules stated in `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`
 - Architectural decisions in `docs/adr/*.md` (only those with status `Accepted`)

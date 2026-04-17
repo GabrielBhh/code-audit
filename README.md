@@ -212,16 +212,34 @@ code-audit/
 ├── SKILL.md                               # Skill definition (loaded by Claude Code)
 ├── README.md                              # This file
 └── references/
-    ├── security-rules.md                  # OWASP Top 10, SSTI, XXE, ReDoS, secret regex
-    ├── language-rules.md                  # Non-obvious language patterns (pruned, ~10 rules/lang)
-    ├── simplification-rules.md            # Code simplification patterns (60+)
-    ├── swift-apple-rules.md               # Swift/SwiftUI + Apple Liquid Glass (iOS 26)
-    ├── api-design-rules.md                # REST, GraphQL, gRPC design
-    ├── tool-orchestration-rules.md        # SAST tools + CVE scanning + git history secrets + licenses
-    ├── git-intelligence-rules.md          # Hotspots, ownership, temporal coupling
-    ├── convention-compliance-rules.md     # CLAUDE.md / ADR enforcement
-    └── baseline-and-state.md              # Baseline + ignore file schemas
+    ├── lang/                              # Per-language rules (load only the detected one)
+    │   ├── _common.md                     #   — language-agnostic simplification
+    │   ├── python.md
+    │   ├── javascript-typescript.md
+    │   ├── go.md · rust.md · ruby.md · php.md
+    │   ├── java-kotlin.md · csharp.md · dart-flutter.md
+    │   ├── c-cpp.md · sql.md · shell.md
+    │   ├── swift.md                       #   — includes Apple Liquid Glass / iOS 26
+    │   └── dockerfile-iac.md
+    ├── security/                          # Security rules (load by applicability)
+    │   ├── core-owasp.md                  #   — always loaded
+    │   ├── web-patterns.md                #   — web languages: XSS, SSTI, XXE, CSRF, etc.
+    │   ├── api-auth.md                    #   — JWT / OAuth / session code
+    │   ├── native-patterns.md             #   — C/C++/unsafe Rust
+    │   └── secrets-regex.md               #   — only in secret-scanning step
+    ├── tools/                             # Tool orchestration (load per pipeline step)
+    │   ├── static-analysis.md             #   — Step 3 SAST tools per language
+    │   ├── cve-scanning.md                #   — Step 4 CVE + OSV.dev
+    │   ├── secret-history.md              #   — Step 5 gitleaks/trufflehog
+    │   ├── license-compliance.md          #   — Step 4 license scans
+    │   └── mutation-testing.md            #   — optional, opt-in
+    ├── api-design-rules.md                # Load only if REST/GraphQL/gRPC detected
+    ├── git-intelligence-rules.md          # Load only for `all`/branch scope
+    ├── convention-compliance-rules.md     # Load only if convention docs exist
+    └── baseline-and-state.md              # Load only if baseline file exists
 ```
+
+**Lazy-loading design**: files are loaded only when needed. A typical small Python pre-commit audit loads ~5K tokens of references (vs ~16K in v2.0.x). See the SKILL.md Step 2 table for exact load rules.
 
 ---
 
@@ -279,4 +297,7 @@ MIT
 
 ## History
 
-Previously named `claude-local-code-review` (v1.0–1.1) and briefly `claude-code-audit` (v2.0). Renamed to `code-audit` in v2.0.1 — the skill-name field cannot contain reserved words.
+- `v1.0–1.1`: Originally named `claude-local-code-review`. Broad multi-language reviewer.
+- `v2.0`: Renamed to `claude-code-audit` and repositioned around tool orchestration (Option B).
+- `v2.0.1`: Renamed to `code-audit` — the skill-name field cannot contain reserved words.
+- `v2.0.2`: Lazy-loading refactor. Reference files split per-language and per-pipeline-step. Typical audit token cost reduced ~60%.
